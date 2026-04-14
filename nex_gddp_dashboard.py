@@ -714,6 +714,114 @@ def build_warming_rate_figure(
     )
 
     return fig
+def build_anomaly_figure(
+    data: dict,
+    active_models: list[str],
+    active_scens: list[str],
+) -> go.Figure:
+    """Heatmap de anomalía de temperatura por año y escenario."""
+    BASELINE_START, BASELINE_END = 1950, 1980
+
+    scen_labels = {
+        "historical": "Histórico",
+        "ssp245":     "SSP2-4.5",
+        "ssp585":     "SSP5-8.5",
+    }
+
+    hist_ens = ensemble_stats(data, active_models, "historical")
+    if hist_ens["years"]:
+        hist_years = np.array(hist_ens["years"])
+        hist_means = np.array(hist_ens["mean"])
+        mask = (hist_years >= BASELINE_START) & (hist_years <= BASELINE_END)
+        baseline = float(np.nanmean(hist_means[mask])) if mask.any() else 0.0
+    else:
+        baseline = 0.0
+
+    z_matrix = []
+    y_labels  = []
+
+    for scen in ["historical", "ssp245", "ssp585"]:
+        if scen not in active_scens:
+            continue
+        ens = ensemble_stats(data, active_models, scen)
+        if not ens["years"]:
+            continue
+
+        years   = np.array(ens["years"])
+        anomaly = np.array(ens["mean"]) - baseline
+
+        full_years   = np.arange(1950, 2101)
+        full_anomaly = np.full(len(full_years), np.nan)
+        for i, y in enumerate(years):
+            if 1950 <= y <= 2100:
+                full_anomaly[y - 1950] = anomaly[i]
+
+        z_matrix.append(full_anomaly.tolist())
+        y_labels.append(scen_labels[scen])
+
+    if not z_matrix:
+        return go.Figure()
+
+    fig = go.Figure(go.Heatmap(
+        z=z_matrix,
+        x=list(range(1950, 2101)),
+        y=y_labels,
+        colorscale=[
+            [0.00, "#0d47a1"],
+            [0.25, "#42a5f5"],
+            [0.45, "#e3f2fd"],
+            [0.5,  "#ffffff"],
+            [0.55, "#fff9c4"],
+            [0.75, "#ff7043"],
+            [1.00, "#b71c1c"],
+        ],
+        zmid=0,
+        zmin=-1,
+        zmax=6,
+        colorbar=dict(
+            title=dict(text="Anomalía (°C)", font=dict(size=11, color="#c8d8f0")),
+            ticksuffix="°C",
+            tickfont=dict(color="#c8d8f0", size=10),
+            outlinecolor="#1a2a4a",
+            outlinewidth=1,
+            len=0.8,
+        ),
+        hovertemplate="Año: %{x}<br>Escenario: %{y}<br>Anomalía: %{z:+.2f}°C<extra></extra>",
+        xgap=0.5,
+        ygap=3,
+    ))
+
+    fig.add_vline(
+        x=2015, line_dash="dot", line_color="rgba(255,255,255,0.4)", line_width=1.5,
+        annotation_text="◀ HISTÓRICO | PROYECCIÓN ▶",
+        annotation_font_size=9, annotation_font_color="rgba(255,255,255,0.4)",
+        annotation_position="top",
+    )
+
+    fig.update_layout(
+        paper_bgcolor="#080c14",
+        plot_bgcolor="#0d1526",
+        font=dict(family="Space Mono, monospace", color="#c8d8f0", size=11),
+        title=dict(
+            text="Mapa de Calor · Anomalía de Temperatura 1950–2100 (base: 1950–1980)",
+            font=dict(size=13, color="#e8f2ff", family="Syne, sans-serif"),
+            x=0.01, y=0.97, yanchor="top",
+        ),
+        xaxis=dict(
+            title="Año",
+            gridcolor="rgba(255,255,255,0.05)",
+            linecolor="#1a2a4a",
+            tickfont=dict(size=10),
+            dtick=10,
+        ),
+        yaxis=dict(
+            tickfont=dict(size=11, color="#c8d8f0"),
+            linecolor="#1a2a4a",
+        ),
+        margin=dict(l=90, r=100, t=80, b=60),
+        height=320,
+    )
+    return fig
 # ──────────────────────────────────────────────────────────────────
 # 5.  APP DASH
 # ──────────────────────────────────────────────────────────────────
@@ -946,7 +1054,56 @@ app.layout = dbc.Container(
             style={"marginTop": "20px", "fontSize": "9px", "color": MUTED,
                    "textAlign": "center", "letterSpacing": "0.06em"},
         ),
+        # ── Separador visual ────────────────────────────────────────
+        html.Hr(style={"borderColor": BORDER, "marginTop": "36px", "marginBottom": "32px"}),
 
+        # ── Encabezado sección Anomalía ──────────────────────────────
+        html.Div([
+            html.P(
+                "IEEE SciVis Contest 2026 · NEX-GDDP CMIP6 · Anomalía de Temperatura",
+                style={"fontFamily": "Space Mono", "fontSize": "10px",
+                    "letterSpacing": "0.2em", "color": "#f4714a",
+                    "textTransform": "uppercase", "marginBottom": "6px"},
+            ),
+            html.H2(
+                ["Mapa de Calor · ", html.Span("Anomalía Térmica 1950–2100", style={"color": "#f4714a"})],
+                style={"fontFamily": "Syne, sans-serif", "fontWeight": "800",
+                    "fontSize": "clamp(18px,3vw,30px)", "color": "#e8f2ff",
+                    "letterSpacing": "-0.02em", "lineHeight": "1.1"},
+            ),
+            html.P(
+                "Diferencia respecto a la temperatura media del período 1950–1980 · "
+                "Azul = más frío que la referencia · Blanco = igual a la referencia · "
+                "Rojo = más caliente · Las líneas de umbral del Acuerdo de París son +1.5°C y +2.0°C.",
+                style={"fontSize": "11px", "color": MUTED, "lineHeight": "1.7",
+                    "maxWidth": "680px", "marginTop": "6px"},
+            ),
+        ], style={"marginBottom": "16px"}),
+
+        # ── Gráfico de anomalía (heatmap) ────────────────────────────
+        dbc.Card(
+            dcc.Graph(
+                id="anomaly-chart",
+                config={"displayModeBar": True,
+                        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                        "displaylogo": False},
+                style={"height": "320px"},
+            ),
+            style={
+                "background": SURFACE,
+                "border": f"1px solid {BORDER}",
+                "borderRadius": "4px",
+                "overflow": "hidden",
+                "borderTop": "2px solid #f4714a",
+            },
+        ),
+        html.P(
+            "Anomalía calculada como T(año) − T̄(1950–1980) · Ensamble multi-modelo activo · "
+            "Fuente: NASA NEX-GDDP-CMIP6 · SciVis Contest 2026",
+            style={"marginTop": "12px", "fontSize": "9px", "color": MUTED,
+                "textAlign": "center", "letterSpacing": "0.06em",
+                "marginBottom": "8px"},
+        ),
         #GRAFICA MAR PARTE 2: Mapa de humedad relativa near-surface
         # ── Separador visual (temperatura / tasa de calentamiento) ──
         html.Hr(style={"borderColor": BORDER, "marginTop": "36px", "marginBottom": "32px"}),
@@ -1273,6 +1430,13 @@ def update_hurs_slider_range(scenario, current_year):
 )
 def update_rate_chart(active_scens, active_models):
     return build_warming_rate_figure(DATA, active_models or [], active_scens or [])
+@app.callback(
+    Output("anomaly-chart", "figure"),
+    Input("scen-checklist", "value"),
+    Input("model-checklist", "value"),
+)
+def update_anomaly_chart(active_scens, active_models):
+    return build_anomaly_figure(DATA, active_models or [], active_scens or [])
 # ──────────────────────────────────────────────────────────────────
 # 7.  PUNTO DE ENTRADA
 # ──────────────────────────────────────────────────────────────────
