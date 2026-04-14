@@ -290,6 +290,152 @@ def load_hurs_map(model: str, scenario: str, year: int) -> np.ndarray:
         json.dump(result, f)
     return sub
 
+def load_global_mean_hurs(model: str, scenario: str) -> dict:
+    """Carga o calcula la humedad relativa media global por año."""
+    cache_key = CACHE_DIR / f"hurs_global_{model}_{scenario}_q{QUALITY}_doy{DOY}.json"
+    if cache_key.exists():
+        with open(cache_key) as f:
+            return json.load(f)
+
+    db = ov.LoadDataset(REMOTE_URL)
+    run = MODELS[model]
+    field = get_field_name("hurs", model, scenario, run)
+    years = list(SCENARIOS[scenario]["years"])
+
+    try:
+        ref = db.read(field=field, time=timestep_for(years[0], DOY), quality=QUALITY)
+        num_valid = ref.size - np.isnan(ref).sum()
+        if num_valid == 0:
+            num_valid = ref.size
+    except Exception:
+        num_valid = 600 * 1440
+
+    def fetch_year_hurs(year: int) -> float:
+        try:
+            data = db.read(time=timestep_for(year, DOY), field=field, quality=QUALITY)
+            return float(np.nansum(data) / num_valid)
+        except Exception:
+            return float("nan")
+
+    print(f"\n⬇ Humedad global {model} / {scenario} ({len(years)} años) ...")
+    vals = thread_map(fetch_year_hurs, years, max_workers=8, leave=False)
+    result = {"years": years, "hurs": vals}
+    with open(cache_key, "w") as f:
+        json.dump(result, f)
+    return result
+
+
+def ensemble_hurs_stats(active_models: list[str], scenario: str) -> dict:
+    """Calcula media, mín y máx del ensamble de humedad para un escenario."""
+    all_hurs = []
+    years = None
+    for m in active_models:
+        try:
+            d = load_global_mean_hurs(m, scenario)
+            all_hurs.append(d["hurs"])
+            years = d["years"]
+        except Exception as e:
+            print(f"[hurs_trend] ERROR {m}/{scenario}: {e}")
+            continue
+    if not all_hurs or years is None:
+        return {"years": [], "mean": [], "min": [], "max": []}
+    arr = np.array(all_hurs, dtype=float)
+    return {
+        "years": years,
+        "mean": np.nanmean(arr, axis=0).tolist(),
+        "min":  np.nanmin(arr,  axis=0).tolist(),
+        "max":  np.nanmax(arr,  axis=0).tolist(),
+    }
+
+
+def build_hurs_trend_figure(
+    active_models: list[str],
+    active_scens: list[str],
+    show_bands: bool,
+) -> go.Figure:
+    """Líneas de evolución de humedad relativa global promedio 1950–2100."""
+    fig = go.Figure()
+
+    scen_cfg = {
+        "historical": ("Humedad histórica",  "#c084fc", "solid"),
+        "ssp245":     ("Humedad SSP2-4.5",   "#a855f7", "solid"),
+        "ssp585":     ("Humedad SSP5-8.5",   "#7e22ce", "solid"),
+    }
+
+    # Divisor histórico / proyección
+    fig.add_vline(
+        x=2015, line_dash="dot", line_color="rgba(255,255,255,0.15)",
+        annotation_text="◀ HISTÓRICO | PROYECCIÓN ▶",
+        annotation_font_size=9, annotation_font_color="rgba(255,255,255,0.3)",
+        annotation_position="top",
+    )
+
+    # Bandas de incertidumbre
+    if show_bands and len(active_models) > 1:
+        for scen, fill_color in [
+            ("ssp245", "rgba(168,85,247,0.10)"),
+            ("ssp585", "rgba(126,34,206,0.10)"),
+        ]:
+            if scen not in active_scens:
+                continue
+            ens = ensemble_hurs_stats(active_models, scen)
+            if not ens["years"]:
+                continue
+            fig.add_trace(go.Scatter(
+                x=ens["years"] + ens["years"][::-1],
+                y=ens["max"] + ens["min"][::-1],
+                fill="toself", fillcolor=fill_color,
+                line=dict(width=0),
+                name=f"Rango inter-modelos {scen}",
+                hoverinfo="skip", showlegend=True,
+            ))
+
+    # Líneas de ensamble
+    for scen in active_scens:
+        ens = ensemble_hurs_stats(active_models, scen)
+        if not ens["years"]:
+            continue
+        label, color, dash = scen_cfg[scen]
+        fig.add_trace(go.Scatter(
+            x=ens["years"], y=ens["mean"],
+            mode="lines",
+            line=dict(color=color, width=2.8, dash=dash),
+            name=label,
+            hovertemplate=f"{label}<br>Año: %{{x}}<br>Humedad: %{{y:.2f}}%<extra></extra>",
+        ))
+
+    # Franja zona histórica
+    fig.add_vrect(
+        x0=1950, x1=2015,
+        fillcolor="rgba(192,132,252,0.03)",
+        line_width=0, layer="below",
+    )
+
+    fig.update_layout(
+        paper_bgcolor="#080c14",
+        plot_bgcolor="#0d1526",
+        font=dict(family="Space Mono, monospace", color="#c8d8f0", size=11),
+        xaxis=dict(
+            title="Año", range=[1950, 2100],
+            gridcolor="rgba(255,255,255,0.05)",
+            linecolor="#1a2a4a", tickfont=dict(size=10), dtick=10,
+        ),
+        yaxis=dict(
+            title="Humedad relativa media global (%)",
+            gridcolor="rgba(255,255,255,0.05)",
+            linecolor="#1a2a4a", tickfont=dict(size=10), ticksuffix="%",
+        ),
+        legend=dict(
+            bgcolor="rgba(13,21,38,0.85)", bordercolor="#1a2a4a", borderwidth=1,
+            font=dict(size=10), orientation="h",
+            yanchor="bottom", y=1.02, xanchor="left", x=0,
+        ),
+        hovermode="x unified",
+        margin=dict(l=70, r=80, t=60, b=60),
+        height=460,
+        dragmode="pan",
+    )
+    return fig
 
 def build_hurs_map_figure(model: str, scenario: str, year: int) -> go.Figure:
     """
@@ -1054,6 +1200,62 @@ app.layout = dbc.Container(
             style={"marginTop": "20px", "fontSize": "9px", "color": MUTED,
                    "textAlign": "center", "letterSpacing": "0.06em"},
         ),
+        
+        # ── Separador visual ─────────────────────────────────────
+        html.Hr(style={"borderColor": BORDER, "marginTop": "40px", "marginBottom": "36px"}),
+
+        # ── Encabezado sección Tendencia de Humedad ──────────────
+        html.Div([
+            html.P(
+                "IEEE SciVis Contest 2026 · NEX-GDDP CMIP6 · Variable: hurs",
+                style={"fontFamily": "Space Mono", "fontSize": "10px",
+                    "letterSpacing": "0.2em", "color": "#c084fc",
+                    "textTransform": "uppercase", "marginBottom": "6px"},
+            ),
+            html.H2(
+                ["Tendencia de Humedad ", html.Span("Relativa Global 1950–2100", style={"color": "#c084fc"})],
+                style={"fontFamily": "Syne, sans-serif", "fontWeight": "800",
+                    "fontSize": "clamp(18px,3vw,30px)", "color": "#e8f2ff",
+                    "letterSpacing": "-0.02em", "lineHeight": "1.1"},
+            ),
+            html.P(
+                "Evolución de la humedad relativa near-surface (hurs, %) promediada globalmente · "
+                "Compara el período histórico con las proyecciones SSP2-4.5 y SSP5-8.5 · "
+                "Las bandas muestran el rango de incertidumbre entre modelos.",
+                style={"fontSize": "11px", "color": MUTED, "lineHeight": "1.7",
+                    "maxWidth": "680px", "marginTop": "6px"},
+            ),
+        ], style={"marginBottom": "16px"}),
+
+        # ── Gráfico de tendencia de humedad ──────────────────────
+        dbc.Card(
+            dcc.Graph(
+                id="hurs-trend-chart",
+                config={"scrollZoom": True, "displayModeBar": True,
+                        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                        "displaylogo": False},
+                style={"height": "460px"},
+            ),
+            style={
+                "background": SURFACE,
+                "border": f"1px solid {BORDER}",
+                "borderRadius": "4px",
+                "overflow": "hidden",
+                "borderTop": "2px solid #c084fc",
+            },
+        ),
+        html.P(
+            [
+                f"Variable: hurs (Near-Surface Relative Humidity, %) · "
+                f"Media global del ensamble de modelos activos · ",
+                html.Br(),
+                "Fuente: NASA NEX-GDDP-CMIP6 · SciVis Contest 2026",
+            ],
+            style={"marginTop": "12px", "fontSize": "9px", "color": MUTED,
+                "textAlign": "center", "letterSpacing": "0.06em",
+                "marginBottom": "8px"},
+        ),
+
         # ── Separador visual ────────────────────────────────────────
         html.Hr(style={"borderColor": BORDER, "marginTop": "36px", "marginBottom": "32px"}),
 
@@ -1394,7 +1596,15 @@ def update_hurs_map(year, model, scenario):
     year     = year     or 1980
     return build_hurs_map_figure(model, scenario, year)
 
-
+@app.callback(
+    Output("hurs-trend-chart", "figure"),
+    Input("scen-checklist", "value"),
+    Input("model-checklist", "value"),
+    Input("opts-checklist", "value"),
+)
+def update_hurs_trend(active_scens, active_models, opts):
+    show_bands = "bands" in (opts or [])
+    return build_hurs_trend_figure(active_models or [], active_scens or [], show_bands)
 @app.callback(
     Output("hurs-year-slider", "min"),
     Output("hurs-year-slider", "max"),
