@@ -220,6 +220,226 @@ def compute_stats_cards(data: dict, active_models: list[str]) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────
+# 3b. FUNCIONES DE MAPA MUNDIAL DE HUMEDAD (hurs)
+# ──────────────────────────────────────────────────────────────────
+# El grid NEX-GDDP tiene forma (600, 1440):
+#   600 filas  → latitudes de -90° a +90°  (paso 0.3°)
+#   1440 cols  → longitudes de 0° a 360°   (paso 0.25°)
+# Se pre-calculan coordenadas geográficas para el mapa Plotly.
+
+_HURS_LATS = np.linspace(-90.0, 90.0,  600)   # centro de cada celda
+_HURS_LONS = np.linspace(  0.0, 359.75, 1440)  # centro de cada celda (0–360)
+# Para Plotly usamos longitudes en -180…180
+_HURS_LONS_180 = np.where(_HURS_LONS > 180, _HURS_LONS - 360, _HURS_LONS)
+
+# Factor de submuestreo para el mapa: cada N filas/cols → punto en el mapa.
+# Con quality=-4 la resolución ya es reducida; tomamos cada 4 celdas para
+# mantener el mapa fluido sin perder legibilidad.
+_MAP_STEP = 4
+_MAP_LATS = _HURS_LATS[::_MAP_STEP]
+_MAP_LONS = _HURS_LONS_180[::_MAP_STEP]
+
+
+def hurs_map_cache_path(model: str, scenario: str, year: int) -> Path:
+    return CACHE_DIR / f"hurs_map_{model}_{scenario}_y{year}_q{QUALITY}_doy{DOY}.json"
+
+
+def load_hurs_map(model: str, scenario: str, year: int) -> np.ndarray:
+    """
+    Descarga o lee de caché la cuadrícula 2-D de humedad (float32, NaN donde
+    sin dato) para un modelo, escenario y año dados.
+
+    El grid NEX-GDDP viene con longitudes 0→360. Lo reorganizamos a -180→180
+    con np.roll para que el mapa quede centrado en el meridiano 0°.
+
+    Retorna ndarray shape (n_lat, n_lon) con latitudes S→N y lons -180→180.
+    Los valores ya están en % (hurs viene en %).
+    """
+    cp = hurs_map_cache_path(model, scenario, year)
+    if cp.exists():
+        with open(cp) as f:
+            raw = json.load(f)
+        # Reconstruir ndarray; None → NaN
+        arr = np.array(
+            [[np.nan if v is None else v for v in row] for row in raw],
+            dtype=np.float32,
+        )
+        return arr
+
+    db    = ov.LoadDataset(REMOTE_URL)
+    run   = MODELS[model]
+    field = get_field_name("hurs", model, scenario, run)
+    try:
+        data = db.read(field=field, time=timestep_for(year, DOY), quality=QUALITY)
+        # data shape: (600, 1440), lons 0→360
+        # Submuestrear cada _MAP_STEP celdas
+        sub = data[::_MAP_STEP, ::_MAP_STEP].astype(np.float32)
+        # Roll: desplazar columnas n_lon//2 posiciones → lons -180→180
+        n_lon = sub.shape[1]
+        sub   = np.roll(sub, n_lon // 2, axis=1)
+    except Exception as exc:
+        print(f"  [hurs_map] error {model}/{scenario}/{year}: {exc}")
+        sub = np.full((len(_MAP_LATS), len(_MAP_LONS)), np.nan, dtype=np.float32)
+
+    # Serializar: NaN → None para JSON
+    result = [
+        [None if np.isnan(v) else round(float(v), 2) for v in row]
+        for row in sub
+    ]
+    with open(cp, "w") as f:
+        json.dump(result, f)
+    return sub
+
+
+def build_hurs_map_figure(model: str, scenario: str, year: int) -> go.Figure:
+    """
+    Mapa mundial de humedad relativa.
+
+    • go.Heatmap con zsmooth="best" rellena el grid de forma continua.
+    • Se aplica un filtro gaussiano para suavizar los bordes pixelados,
+      preservando los NaN del océano (máscara tierra/océano intacta).
+    • Sin fronteras ni líneas de países — solo la paleta de colores.
+    """
+    arr = load_hurs_map(model, scenario, year)  # ndarray (n_lat, n_lon)
+
+    # ── Antialiasing de bordes tierra/océano ─────────────────────
+    # Técnica "normalized convolution" (feathering):
+    #   1. Máscara binaria tierra (1) / océano-NaN (0).
+    #   2. Se suavizan TANTO los valores como la máscara con el mismo kernel.
+    #   3. Dividir valores_suavizados / máscara_suavizada → promedio ponderado
+    #      que solo usa vecinos de tierra: el interior no cambia, los bordes
+    #      se difuminan gradualmente hacia NaN en lugar de cortar en duro.
+    #   4. Celdas con peso < umbral → NaN (océano limpio sin artefactos).
+    try:
+        from scipy.ndimage import gaussian_filter
+
+        mask_land  = (~np.isnan(arr)).astype(np.float64)      # 1=tierra, 0=océano
+        arr_f64    = np.where(mask_land.astype(bool), arr.astype(np.float64), 0.0)
+
+        # ── Paso 1: suavizado leve del interior ──────────────────
+        sigma_int  = 0.9
+        sv_int     = gaussian_filter(arr_f64,   sigma=sigma_int)
+        sm_int     = gaussian_filter(mask_land, sigma=sigma_int)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            arr_int = np.where(sm_int > 0.5,
+                               sv_int / sm_int, np.nan).astype(np.float32)
+
+        # ── Paso 2: feathering fuerte en los bordes ───────────────
+        sigma_edge = 2.0
+        sv_edge    = gaussian_filter(arr_f64,   sigma=sigma_edge)
+        sm_edge    = gaussian_filter(mask_land, sigma=sigma_edge)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            arr_edge = np.where(sm_edge > 0.05,
+                                sv_edge / sm_edge, np.nan).astype(np.float32)
+
+        # ── Combinar: interior usa suavizado leve, borde usa feathering ──
+        interior = mask_land.astype(bool)
+        arr = np.where(interior, arr_int, arr_edge)
+
+    except ImportError:
+        pass  # scipy no disponible → array original sin suavizado
+
+    # ── Coordenadas derivadas del tamaño real del array ───────────
+    n_lat, n_lon = arr.shape
+    lats_arr = np.linspace(-90.0,  90.0, n_lat)
+    lons_180 = np.linspace(-180.0, 180.0, n_lon, endpoint=False)
+
+    colorscale = [
+        [0.00, "#f4714a"],
+        [0.25, "#f4d44a"],
+        [0.50, "#38c7a0"],
+        [0.75, "#6db3ff"],
+        [1.00, "#c084fc"],
+    ]
+
+    scen_label = SCENARIOS[scenario]["label"]
+
+    # ── Dimensiones fijas del figure ──────────────────────────────
+    FIG_H = 520
+    ML, MR, MT, MB = 55, 90, 75, 40
+
+    fig = go.Figure()
+
+    # ── Heatmap continuo sin fronteras ────────────────────────────
+    fig.add_trace(go.Heatmap(
+        z=arr.tolist(),
+        x=lons_180.tolist(),
+        y=lats_arr.tolist(),
+        zmin=0,
+        zmax=100,
+        colorscale=colorscale,
+        zsmooth="best",
+        connectgaps=False,
+        colorbar=dict(
+            title=dict(
+                text="HR (%)",
+                font=dict(family="Space Mono", color="#c8d8f0", size=10),
+            ),
+            tickfont=dict(family="Space Mono", color="#c8d8f0", size=9),
+            ticksuffix="%",
+            thickness=14,
+            len=0.85,
+            bgcolor="rgba(13,21,38,0.75)",
+            bordercolor="#1a2a4a",
+            borderwidth=1,
+            outlinewidth=0,
+            x=1.01,
+        ),
+        hovertemplate="Lat: %{y:.1f}°  Lon: %{x:.1f}°<br>Humedad: %{z:.1f}%<extra></extra>",
+        name="",
+    ))
+
+    fig.update_layout(
+        # ── Eje X (longitud) ──────────────────────────────────────
+        xaxis=dict(
+            range=[-180, 180],
+            showgrid=False,
+            zeroline=False,
+            tickfont=dict(family="Space Mono", size=8, color="#5a7099"),
+            tickvals=list(range(-150, 181, 30)),
+            ticktext=[
+                f"{abs(v)}°{'O' if v < 0 else ('E' if v > 0 else '')}"
+                for v in range(-150, 181, 30)
+            ],
+            linecolor="#1a2a4a",
+            domain=[0, 1],
+        ),
+        # ── Eje Y (latitud) ───────────────────────────────────────
+        yaxis=dict(
+            range=[-90, 90],
+            showgrid=False,
+            zeroline=False,
+            tickfont=dict(family="Space Mono", size=8, color="#5a7099"),
+            tickvals=list(range(-90, 91, 30)),
+            ticktext=[
+                f"{abs(v)}°{'S' if v < 0 else ('N' if v > 0 else '')}"
+                for v in range(-90, 91, 30)
+            ],
+            linecolor="#1a2a4a",
+        ),
+        # ── Estilo general ────────────────────────────────────────
+        paper_bgcolor="#080c14",
+        plot_bgcolor="#080c14",
+        font=dict(family="Space Mono, monospace", color="#c8d8f0", size=11),
+        title=dict(
+            text=(
+                f"<b>Humedad Relativa Near-Surface (hurs)</b><br>"
+                f"<span style='font-size:11px;color:#5a7099'>"
+                f"Modelo: {model} · {scen_label} · "
+                f"Año: {year} · Día {DOY} (~1 Jul)</span>"
+            ),
+            x=0.01,
+            xanchor="left",
+            font=dict(size=13, color="#e8f2ff"),
+        ),
+        margin=dict(l=ML, r=MR, t=MT, b=MB),
+        height=FIG_H,
+    )
+
+    return fig
+
+
+# ──────────────────────────────────────────────────────────────────
 # 4.  FUNCIÓN DE CONSTRUCCIÓN DEL GRÁFICO PLOTLY
 # ──────────────────────────────────────────────────────────────────
 MODEL_COLORS = {
@@ -537,6 +757,11 @@ print("═"*60)
 DATA = build_dataset()
 print("\n✓ Dataset listo.\n")
 
+# Pre-cargar el mapa de humedad del año inicial para el primer render
+print("Pre-cargando mapa de humedad inicial (1980, ACCESS-CM2, historical)...")
+_HURS_INITIAL_FIG = build_hurs_map_figure("ACCESS-CM2", "historical", 1980)
+print("✓ Mapa de humedad inicial listo.\n")
+
 # ── Layout ───────────────────────────────────────────────────────
 app = dash.Dash(
     __name__,
@@ -733,6 +958,186 @@ app.layout = dbc.Container(
             style={"marginTop": "20px", "fontSize": "9px", "color": MUTED,
                    "textAlign": "center", "letterSpacing": "0.06em"},
         ),
+
+        # ══════════════════════════════════════════════════════════
+        # ── Separador visual ─────────────────────────────────────
+        html.Hr(style={"borderColor": BORDER, "marginTop": "40px", "marginBottom": "36px"}),
+
+        # ── Encabezado sección Humedad ───────────────────────────
+        html.Div(
+            [
+                html.P(
+                    "IEEE SciVis Contest 2026 · NEX-GDDP CMIP6 · Variable: hurs",
+                    style={"fontFamily": "Space Mono", "fontSize": "10px",
+                           "letterSpacing": "0.2em", "color": "#c084fc",
+                           "textTransform": "uppercase", "marginBottom": "6px"},
+                ),
+                html.H2(
+                    ["Humedad Relativa ", html.Span("Near-Surface · Mapa Mundial", style={"color": "#c084fc"})],
+                    style={"fontFamily": "Syne, sans-serif", "fontWeight": "800",
+                           "fontSize": "clamp(18px,3vw,30px)", "color": "#e8f2ff",
+                           "letterSpacing": "-0.02em", "lineHeight": "1.1"},
+                ),
+                html.P(
+                    "Humedad relativa near-surface (hurs, %) a escala global · "
+                    "Selecciona el año con el deslizador, el modelo climático y el escenario "
+                    "para explorar cómo varía la humedad entre regiones. "
+                    "Escala de color: naranja = seco · verde = moderado · violeta = muy húmedo.",
+                    style={"fontSize": "11px", "color": MUTED, "lineHeight": "1.7",
+                           "maxWidth": "720px", "marginTop": "6px"},
+                ),
+            ],
+            style={"marginBottom": "20px"},
+        ),
+
+        # ── Controles del mapa de humedad ────────────────────────
+        dbc.Row(
+            [
+                # — Selector de modelo —
+                dbc.Col(
+                    [
+                        html.Span("Modelo", style={"fontSize": "9px", "color": MUTED,
+                                                    "letterSpacing": "0.15em",
+                                                    "textTransform": "uppercase",
+                                                    "display": "block",
+                                                    "marginBottom": "4px"}),
+                        dcc.Dropdown(
+                            id="hurs-model-dropdown",
+                            options=[{"label": m, "value": m} for m in MODELS],
+                            value="ACCESS-CM2",
+                            clearable=False,
+                            style={
+                                "fontFamily": "Space Mono, monospace",
+                                "fontSize": "11px",
+                                "backgroundColor": "#0d1526",
+                                "color": "#c8d8f0",
+                                "border": f"1px solid #1a2a4a",
+                                "borderRadius": "3px",
+                                "minWidth": "180px",
+                            },
+                        ),
+                    ],
+                    width="auto",
+                ),
+                # — Selector de escenario —
+                dbc.Col(
+                    [
+                        html.Span("Escenario", style={"fontSize": "9px", "color": MUTED,
+                                                       "letterSpacing": "0.15em",
+                                                       "textTransform": "uppercase",
+                                                       "display": "block",
+                                                       "marginBottom": "4px"}),
+                        dbc.RadioItems(
+                            id="hurs-scen-radio",
+                            options=[
+                                {"label": "Histórico (1950–2014)", "value": "historical"},
+                                {"label": "SSP2-4.5 (2015–2100)",  "value": "ssp245"},
+                                {"label": "SSP5-8.5 (2015–2100)",  "value": "ssp585"},
+                            ],
+                            value="historical",
+                            inline=True,
+                            style={"fontFamily": "Space Mono", "fontSize": "11px", "color": TEXT},
+                            input_checked_style={"backgroundColor": "#c084fc", "borderColor": "#c084fc"},
+                            label_checked_style={"color": "#c084fc"},
+                        ),
+                    ],
+                    width="auto",
+                ),
+            ],
+            align="center",
+            style={"marginBottom": "12px", "gap": "24px", "rowGap": "10px",
+                   "flexWrap": "wrap", "background": SURFACE,
+                   "border": f"1px solid {BORDER}", "borderRadius": "4px",
+                   "padding": "14px 18px"},
+            class_name="g-2",
+        ),
+
+        # — Deslizador de año —
+        html.Div(
+            [
+                html.Span("Año", style={"fontSize": "9px", "color": MUTED,
+                                        "letterSpacing": "0.15em",
+                                        "textTransform": "uppercase",
+                                        "marginRight": "16px",
+                                        "verticalAlign": "middle"}),
+                dcc.Slider(
+                    id="hurs-year-slider",
+                    min=1950,
+                    max=2014,    # se actualiza dinámicamente según escenario
+                    step=1,
+                    value=1980,
+                    marks={y: {"label": str(y),
+                                "style": {"fontFamily": "Space Mono", "fontSize": "9px",
+                                          "color": MUTED}}
+                           for y in range(1950, 2015, 10)},
+                    tooltip={"always_visible": True, "placement": "bottom",
+                             "style": {"fontFamily": "Space Mono", "fontSize": "10px",
+                                       "color": "#c8d8f0", "backgroundColor": "#0d1526"}},
+                    updatemode="mouseup",
+                ),
+            ],
+            style={"background": SURFACE, "border": f"1px solid {BORDER}",
+                   "borderRadius": "4px", "padding": "14px 18px",
+                   "marginBottom": "16px"},
+            id="hurs-slider-container",
+        ),
+
+        # ── Mapa mundial de humedad ──────────────────────────────
+        dbc.Card(
+            dcc.Graph(
+                id="hurs-map",
+                figure=_HURS_INITIAL_FIG,
+                config={"scrollZoom": True, "displayModeBar": True,
+                        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                        "displaylogo": False},
+                style={"height": "520px"},
+            ),
+            style={
+                "background": SURFACE,
+                "border": f"1px solid {BORDER}",
+                "borderRadius": "4px",
+                "overflow": "hidden",
+                "borderTop": "2px solid #c084fc",
+            },
+        ),
+
+        # ── Leyenda de escala de color ───────────────────────────
+        html.Div(
+            [
+                html.Span("Escala de humedad:  ", style={"fontSize": "9px", "color": MUTED}),
+                *[
+                    html.Span(
+                        f"{'▇' * 3} {label}",
+                        style={"color": color, "fontFamily": "Space Mono",
+                               "fontSize": "9px", "marginRight": "16px"},
+                    )
+                    for color, label in [
+                        ("#f4714a", "Muy seco (0–20%)"),
+                        ("#f4d44a", "Seco (20–40%)"),
+                        ("#38c7a0", "Moderado (40–60%)"),
+                        ("#6db3ff", "Húmedo (60–80%)"),
+                        ("#c084fc", "Muy húmedo (80–100%)"),
+                    ]
+                ],
+            ],
+            style={"marginTop": "10px", "paddingLeft": "4px", "flexWrap": "wrap",
+                   "display": "flex", "alignItems": "center"},
+        ),
+
+        # ── Nota de fuente humedad ───────────────────────────────
+        html.P(
+            [
+                f"Variable: hurs (Near-Surface Relative Humidity, %) · "
+                f"Resolución descargada: quality={QUALITY} · "
+                f"Día del año muestreado: {DOY} (~1 julio) · ",
+                html.Br(),
+                f"Grid: 600×1440 (0.25°×0.25°), submuetreado ×{_MAP_STEP} para visualización · "
+                "Fuente: NASA NEX-GDDP-CMIP6 · Mapa: Carto Dark Matter · SciVis Contest 2026",
+            ],
+            style={"marginTop": "16px", "fontSize": "9px", "color": MUTED,
+                   "textAlign": "center", "letterSpacing": "0.06em",
+                   "marginBottom": "20px"},
+        ),
     ],
     fluid=True,
     style={"background": DARK, "minHeight": "100vh", "padding": "32px 24px 60px",
@@ -772,6 +1177,47 @@ def update_chart(active_scens, active_models, opts):
     s585_str = f"{stats['ssp585_2100']:.2f}°C" if stats["ssp585_2100"] else "–"
 
     return fig, fig_anomaly, base_str, hist_str, s245_str, s585_str  # ← fig_anomaly añadido
+
+
+@app.callback(
+    Output("hurs-map", "figure"),
+    Input("hurs-year-slider",   "value"),
+    Input("hurs-model-dropdown","value"),
+    Input("hurs-scen-radio",    "value"),
+)
+def update_hurs_map(year, model, scenario):
+    model    = model    or "ACCESS-CM2"
+    scenario = scenario or "historical"
+    year     = year     or 1980
+    return build_hurs_map_figure(model, scenario, year)
+
+
+@app.callback(
+    Output("hurs-year-slider", "min"),
+    Output("hurs-year-slider", "max"),
+    Output("hurs-year-slider", "value"),
+    Output("hurs-year-slider", "marks"),
+    Input("hurs-scen-radio", "value"),
+    State("hurs-year-slider", "value"),
+)
+def update_hurs_slider_range(scenario, current_year):
+    """Ajusta el rango del slider según el escenario seleccionado."""
+    if scenario == "historical":
+        min_y, max_y = 1950, 2014
+    else:
+        min_y, max_y = 2015, 2100
+
+    # Mantener el año actual si es válido, si no usar el año central del rango
+    if current_year and min_y <= current_year <= max_y:
+        new_val = current_year
+    else:
+        new_val = (min_y + max_y) // 2
+
+    marks = {y: {"label": str(y),
+                 "style": {"fontFamily": "Space Mono", "fontSize": "9px", "color": MUTED}}
+             for y in range(min_y, max_y + 1, 10)}
+
+    return min_y, max_y, new_val, marks
 
 
 # ──────────────────────────────────────────────────────────────────
