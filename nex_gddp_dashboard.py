@@ -602,111 +602,128 @@ def build_figure(
 
     return fig
 
-def build_anomaly_figure(
+#GRAFICA MAR PARTE 1: Tasa de calentamiento por década
+def build_warming_rate_figure(
     data: dict,
     active_models: list[str],
     active_scens: list[str],
 ) -> go.Figure:
-    """Gráfica de anomalía de temperatura respecto a la media 1950–1980."""
-    fig = go.Figure()
-    BASELINE_START, BASELINE_END = 1950, 1980
-
-    # Calcular anomalías por escenario
-    scen_cfg = {
-        "historical": ("Anomalía histórica", "#6db3ff"),
-        "ssp245":     ("Anomalía SSP2-4.5",  "#38c7a0"),
-        "ssp585":     ("Anomalía SSP5-8.5",  "#f4714a"),
+    """
+    Gráfico de barras agrupadas: tasa de calentamiento por década (°C/10 años).
+    Para cada escenario activo calcula la media del ensamble en cada década
+    y computa el delta respecto a la década anterior.
+    """
+    DECADE_SCEN_CFG = {
+        "historical": ("#6db3ff", "Histórico"),
+        "ssp245":     ("#38c7a0", "SSP2-4.5"),
+        "ssp585":     ("#f4714a", "SSP5-8.5"),
     }
 
+    fig = go.Figure()
+
     for scen in active_scens:
+        if scen not in DECADE_SCEN_CFG:
+            continue
         ens = ensemble_stats(data, active_models, scen)
         if not ens["years"]:
             continue
 
-        years = ens["years"]
-        means = np.array(ens["mean"])
+        years = np.array(ens["years"])
+        temps = np.array(ens["mean"])
 
-        # Calcular baseline (media 1950–1980) usando datos históricos
-        hist_ens = ensemble_stats(data, active_models, "historical")
-        if hist_ens["years"]:
-            hist_years = np.array(hist_ens["years"])
-            hist_means = np.array(hist_ens["mean"])
-            mask = (hist_years >= BASELINE_START) & (hist_years <= BASELINE_END)
-            baseline = float(np.nanmean(hist_means[mask])) if mask.any() else 0.0
-        else:
-            baseline = 0.0
+        # Agrupar en décadas y calcular media por década
+        year_min = int(years[0])
+        year_max = int(years[-1])
+        decade_starts = list(range((year_min // 10) * 10, year_max, 10))
 
-        anomaly = means - baseline
-        label, color = scen_cfg[scen]
+        dec_labels = []
+        dec_means  = []
+        for d in decade_starts:
+            mask = (years >= d) & (years < d + 10)
+            if mask.sum() > 0:
+                dec_labels.append(f"{d}s")
+                dec_means.append(float(np.nanmean(temps[mask])))
 
-        # Área rellena debajo/encima de cero
-        fig.add_trace(go.Scatter(
-            x=years,
-            y=anomaly.tolist(),
-            mode="lines",
-            fill="tozeroy",
-            fillcolor={
-                    "#6db3ff": "rgba(109,179,255,0.15)",
-                    "#38c7a0": "rgba(56,199,160,0.15)",
-                    "#f4714a": "rgba(244,113,74,0.15)",
-                }.get(color, "rgba(150,150,150,0.15)"),
-            line=dict(color=color, width=2),
-            name=label,
-            hovertemplate=f"{label}<br>Año: %{{x}}<br>Anomalía: %{{y:+.2f}}°C<extra></extra>",
+        if len(dec_means) < 2:
+            continue
+
+        # Tasa = diferencia entre décadas consecutivas
+        rates = [dec_means[i] - dec_means[i - 1] for i in range(1, len(dec_means))]
+        labels = dec_labels[1:]  # la etiqueta de la década destino
+
+        color_base, scen_name = DECADE_SCEN_CFG[scen]
+
+        # Color por intensidad: positivo usa el color del escenario, negativo gris
+        bar_colors = [
+            color_base if r >= 0 else "#5a7099"
+            for r in rates
+        ]
+        # Opacidad proporcional a la magnitud
+        max_abs = max(abs(r) for r in rates) if rates else 1.0
+
+        fig.add_trace(go.Bar(
+            name=scen_name,
+            x=labels,
+            y=rates,
+            marker=dict(
+                color=bar_colors,
+                opacity=0.85,
+                line=dict(width=0),
+            ),
+            hovertemplate=(
+                f"<b>{scen_name}</b><br>"
+                "Década: %{x}<br>"
+                "Calentamiento: %{y:+.3f} °C<extra></extra>"
+            ),
+            legendgroup=f"rate_{scen}",
         ))
 
-    # Línea cero (referencia)
-    fig.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.2)", line_width=1)
-
-    # Umbrales París como anomalía
-    for delta, color, lbl in [(1.5, "rgba(255,220,80,0.7)", "+1.5°C París"),
-                               (2.0, "rgba(255,110,80,0.7)", "+2.0°C París")]:
-        fig.add_hline(
-            y=delta, line_dash="dash", line_color=color, line_width=1.5,
-            annotation_text=lbl, annotation_font_size=9,
-            annotation_font_color=color, annotation_position="right",
-        )
-
-    fig.add_vline(
-        x=2015, line_dash="dot", line_color="rgba(255,255,255,0.15)",
-        annotation_text="◀ HISTÓRICO | PROYECCIÓN ▶",
-        annotation_font_size=9, annotation_font_color="rgba(255,255,255,0.3)",
-        annotation_position="top",
+    # Línea de cero
+    fig.add_hline(
+        y=0,
+        line_color="rgba(255,255,255,0.15)",
+        line_width=1,
     )
 
     fig.update_layout(
         paper_bgcolor="#080c14",
         plot_bgcolor="#0d1526",
         font=dict(family="Space Mono, monospace", color="#c8d8f0", size=11),
-        title=dict(
-            text="Anomalía de Temperatura Respecto a la Media 1950–1980",
-            font=dict(size=13, color="#e8f2ff", family="Syne, sans-serif"),
-            x=0.01,
-            y=0.97,      # ← agrega esta línea
-            yanchor="top",  # ← y esta
-        ),
+        barmode="group",
+        bargap=0.22,
+        bargroupgap=0.08,
         xaxis=dict(
-            title="Año", range=[1950, 2100],
+            title="Década",
             gridcolor="rgba(255,255,255,0.05)",
-            linecolor="#1a2a4a", tickfont=dict(size=10), dtick=10,
+            linecolor="#1a2a4a",
+            tickfont=dict(size=10),
+            tickangle=-35,
         ),
         yaxis=dict(
-            title="Anomalía (°C respecto a 1950–1980)",
+            title="Calentamiento por década (°C)",
             gridcolor="rgba(255,255,255,0.05)",
-            linecolor="#1a2a4a", tickfont=dict(size=10), ticksuffix="°C",
-            zeroline=True, zerolinecolor="rgba(255,255,255,0.15)", zerolinewidth=1,
+            linecolor="#1a2a4a",
+            tickfont=dict(size=10),
+            ticksuffix="°C",
+            zeroline=False,
         ),
         legend=dict(
-            bgcolor="rgba(13,21,38,0.85)", bordercolor="#1a2a4a", borderwidth=1,
-            font=dict(size=10), orientation="h",
-            yanchor="top", y=0.99, xanchor="left", x=0.35,  # ← leyenda a la derecha del título
+            bgcolor="rgba(13,21,38,0.85)",
+            bordercolor="#1a2a4a",
+            borderwidth=1,
+            font=dict(size=10),
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
         ),
         hovermode="x unified",
-        margin=dict(l=70, r=80, t=80, b=60),  # ← t=60 → t=80
-        height=380,
+        margin=dict(l=70, r=80, t=60, b=70),
+        height=420,
     )
-    return fig
 
+    return fig
 # ──────────────────────────────────────────────────────────────────
 # 5.  APP DASH
 # ──────────────────────────────────────────────────────────────────
@@ -926,25 +943,6 @@ app.layout = dbc.Container(
             class_name="g-2",
         ),
 
-        # ── Gráfica de anomalía ──────────────────────────────────
-        dbc.Card(
-            dcc.Graph(
-                id="anomaly-chart",
-                config={"scrollZoom": True, "displayModeBar": True,
-                        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
-                        "displaylogo": False},
-                style={"height": "380px"},
-            ),
-            style={
-                "background": SURFACE,
-                "border": f"1px solid {BORDER}",
-                "borderRadius": "4px",
-                "overflow": "hidden",
-                "borderTop": f"2px solid #38c7a0",
-                "marginTop": "16px",
-            },
-        ),
-
         # ── Nota de calidad y fuente ─────────────────────────────
         html.P(
             [
@@ -958,6 +956,68 @@ app.layout = dbc.Container(
             style={"marginTop": "20px", "fontSize": "9px", "color": MUTED,
                    "textAlign": "center", "letterSpacing": "0.06em"},
         ),
+
+        #GRAFICA MAR PARTE 2: Mapa de humedad relativa near-surface
+        # ── Separador visual (temperatura / tasa de calentamiento) ──
+        html.Hr(style={"borderColor": BORDER, "marginTop": "36px", "marginBottom": "32px"}),
+        # ── Encabezado sección Tasa de Calentamiento ─────────────────
+        html.Div(
+            [
+                html.P(
+                    "IEEE SciVis Contest 2026 · NEX-GDDP CMIP6 · Análisis temporal",
+                    style={"fontFamily": "Space Mono", "fontSize": "10px",
+                           "letterSpacing": "0.2em", "color": "#38c7a0",
+                           "textTransform": "uppercase", "marginBottom": "6px"},
+                ),
+                html.H2(
+                    ["Tasa de Calentamiento ", html.Span("por Década", style={"color": "#38c7a0"})],
+                    style={"fontFamily": "Syne, sans-serif", "fontWeight": "800",
+                           "fontSize": "clamp(18px,3vw,30px)", "color": "#e8f2ff",
+                           "letterSpacing": "-0.02em", "lineHeight": "1.1"},
+                ),
+                html.P(
+                    "Cambio promedio de temperatura por cada período de 10 años (°C/década) · "
+                    "Cada barra representa cuánto se calentó el planeta en esa década respecto "
+                    "a la anterior · Responde directamente a los modelos y escenarios activos.",
+                    style={"fontSize": "11px", "color": MUTED, "lineHeight": "1.7",
+                           "maxWidth": "680px", "marginTop": "6px"},
+                ),
+            ],
+            style={"marginBottom": "16px"},
+        ),
+        # ── Gráfico de tasa de calentamiento por década ───────────────
+        dbc.Card(
+            dcc.Graph(
+                id="rate-chart",
+                config={"displayModeBar": True,
+                        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                        "displaylogo": False},
+                style={"height": "420px"},
+            ),
+            style={
+                "background": SURFACE,
+                "border": f"1px solid {BORDER}",
+                "borderRadius": "4px",
+                "overflow": "hidden",
+                "borderTop": "2px solid #38c7a0",
+            },
+        ),
+        html.P(
+            [
+                "Tasa de calentamiento = diferencia de temperatura media entre décadas consecutivas · "
+                "Calculada sobre el ensamble de modelos activos · ",
+                html.Br(),
+                "Fuente: NASA NEX-GDDP-CMIP6 · SciVis Contest 2026",
+            ],
+            style={"marginTop": "12px", "fontSize": "9px", "color": MUTED,
+                   "textAlign": "center", "letterSpacing": "0.06em",
+                   "marginBottom": "8px"},
+        ),
+
+
+
+
+
 
         # ══════════════════════════════════════════════════════════
         # ── Separador visual ─────────────────────────────────────
@@ -1150,33 +1210,29 @@ app.layout = dbc.Container(
 # ──────────────────────────────────────────────────────────────────
 @app.callback(
     Output("main-chart", "figure"),
-    Output("anomaly-chart", "figure"),   # ← NUEVA LÍNEA
-    Output("stat-base", "children"),
-    Output("stat-hist", "children"),
-    Output("stat-245", "children"),
-    Output("stat-585", "children"),
-    Input("scen-checklist", "value"),
+    Output("stat-base",  "children"),
+    Output("stat-hist",  "children"),
+    Output("stat-245",   "children"),
+    Output("stat-585",   "children"),
+    Input("scen-checklist",  "value"),
     Input("model-checklist", "value"),
-    Input("opts-checklist", "value"),
+    Input("opts-checklist",  "value"),
 )
 def update_chart(active_scens, active_models, opts):
-    show_bands = "bands" in (opts or [])
+    show_bands  = "bands"  in (opts or [])
     show_thresh = "thresh" in (opts or [])
 
     fig = build_figure(DATA, active_models or [], active_scens or [],
                        show_bands, show_thresh)
 
-    # ← NUEVA LÍNEA
-    fig_anomaly = build_anomaly_figure(DATA, active_models or [], active_scens or [])
-
     stats = compute_stats_cards(DATA, active_models or [])
 
-    base_str = f"{stats['base']:.2f}°C" if stats["base"] else "–"
-    hist_str = f"+{stats['hist_delta']:.2f}°C" if stats["hist_delta"] else "–"
-    s245_str = f"{stats['ssp245_2100']:.2f}°C" if stats["ssp245_2100"] else "–"
-    s585_str = f"{stats['ssp585_2100']:.2f}°C" if stats["ssp585_2100"] else "–"
+    base_str  = f"{stats['base']:.2f}°C"         if stats["base"]        else "–"
+    hist_str  = f"+{stats['hist_delta']:.2f}°C"  if stats["hist_delta"]  else "–"
+    s245_str  = f"{stats['ssp245_2100']:.2f}°C"  if stats["ssp245_2100"] else "–"
+    s585_str  = f"{stats['ssp585_2100']:.2f}°C"  if stats["ssp585_2100"] else "–"
 
-    return fig, fig_anomaly, base_str, hist_str, s245_str, s585_str  # ← fig_anomaly añadido
+    return fig, base_str, hist_str, s245_str, s585_str
 
 
 @app.callback(
@@ -1219,7 +1275,14 @@ def update_hurs_slider_range(scenario, current_year):
 
     return min_y, max_y, new_val, marks
 
-
+# GRAFICA MAR PARTE X: Callback para actualizar el gráfico de tasa de calentamiento por década
+@app.callback(
+    Output("rate-chart", "figure"),
+    Input("scen-checklist",  "value"),
+    Input("model-checklist", "value"),
+)
+def update_rate_chart(active_scens, active_models):
+    return build_warming_rate_figure(DATA, active_models or [], active_scens or [])
 # ──────────────────────────────────────────────────────────────────
 # 7.  PUNTO DE ENTRADA
 # ──────────────────────────────────────────────────────────────────
