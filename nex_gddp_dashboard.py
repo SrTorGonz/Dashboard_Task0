@@ -1204,61 +1204,6 @@ app.layout = dbc.Container(
         # ── Separador visual ─────────────────────────────────────
         html.Hr(style={"borderColor": BORDER, "marginTop": "40px", "marginBottom": "36px"}),
 
-        # ── Encabezado sección Tendencia de Humedad ──────────────
-        html.Div([
-            html.P(
-                "IEEE SciVis Contest 2026 · NEX-GDDP CMIP6 · Variable: hurs",
-                style={"fontFamily": "Space Mono", "fontSize": "10px",
-                    "letterSpacing": "0.2em", "color": "#c084fc",
-                    "textTransform": "uppercase", "marginBottom": "6px"},
-            ),
-            html.H2(
-                ["Tendencia de Humedad ", html.Span("Relativa Global 1950–2100", style={"color": "#c084fc"})],
-                style={"fontFamily": "Syne, sans-serif", "fontWeight": "800",
-                    "fontSize": "clamp(18px,3vw,30px)", "color": "#e8f2ff",
-                    "letterSpacing": "-0.02em", "lineHeight": "1.1"},
-            ),
-            html.P(
-                "Evolución de la humedad relativa near-surface (hurs, %) promediada globalmente · "
-                "Compara el período histórico con las proyecciones SSP2-4.5 y SSP5-8.5 · "
-                "Las bandas muestran el rango de incertidumbre entre modelos.",
-                style={"fontSize": "11px", "color": MUTED, "lineHeight": "1.7",
-                    "maxWidth": "680px", "marginTop": "6px"},
-            ),
-        ], style={"marginBottom": "16px"}),
-
-        # ── Gráfico de tendencia de humedad ──────────────────────
-        dbc.Card(
-            dcc.Graph(
-                id="hurs-trend-chart",
-                config={"scrollZoom": True, "displayModeBar": True,
-                        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
-                        "displaylogo": False},
-                style={"height": "460px"},
-            ),
-            style={
-                "background": SURFACE,
-                "border": f"1px solid {BORDER}",
-                "borderRadius": "4px",
-                "overflow": "hidden",
-                "borderTop": "2px solid #c084fc",
-            },
-        ),
-        html.P(
-            [
-                f"Variable: hurs (Near-Surface Relative Humidity, %) · "
-                f"Media global del ensamble de modelos activos · ",
-                html.Br(),
-                "Fuente: NASA NEX-GDDP-CMIP6 · SciVis Contest 2026",
-            ],
-            style={"marginTop": "12px", "fontSize": "9px", "color": MUTED,
-                "textAlign": "center", "letterSpacing": "0.06em",
-                "marginBottom": "8px"},
-        ),
-
-        # ── Separador visual ────────────────────────────────────────
-        html.Hr(style={"borderColor": BORDER, "marginTop": "36px", "marginBottom": "32px"}),
-
         # ── Encabezado sección Anomalía ──────────────────────────────
         html.Div([
             html.P(
@@ -1361,6 +1306,61 @@ app.layout = dbc.Container(
             style={"marginTop": "12px", "fontSize": "9px", "color": MUTED,
                    "textAlign": "center", "letterSpacing": "0.06em",
                    "marginBottom": "8px"},
+        ),
+
+        # ── Separador visual ────────────────────────────────────────
+        html.Hr(style={"borderColor": BORDER, "marginTop": "36px", "marginBottom": "32px"}),
+
+        # ── Encabezado sección Tendencia de Humedad ──────────────
+        html.Div([
+            html.P(
+                "IEEE SciVis Contest 2026 · NEX-GDDP CMIP6 · Variable: hurs",
+                style={"fontFamily": "Space Mono", "fontSize": "10px",
+                    "letterSpacing": "0.2em", "color": "#c084fc",
+                    "textTransform": "uppercase", "marginBottom": "6px"},
+            ),
+            html.H2(
+                ["Tendencia de Humedad ", html.Span("Relativa Global 1950–2100", style={"color": "#c084fc"})],
+                style={"fontFamily": "Syne, sans-serif", "fontWeight": "800",
+                    "fontSize": "clamp(18px,3vw,30px)", "color": "#e8f2ff",
+                    "letterSpacing": "-0.02em", "lineHeight": "1.1"},
+            ),
+            html.P(
+                "Evolución de la humedad relativa near-surface (hurs, %) promediada globalmente · "
+                "Compara el período histórico con las proyecciones SSP2-4.5 y SSP5-8.5 · "
+                "Las bandas muestran el rango de incertidumbre entre modelos.",
+                style={"fontSize": "11px", "color": MUTED, "lineHeight": "1.7",
+                    "maxWidth": "680px", "marginTop": "6px"},
+            ),
+        ], style={"marginBottom": "16px"}),
+
+        # ── Gráfico de tendencia de humedad ──────────────────────
+        dbc.Card(
+            dcc.Graph(
+                id="hurs-trend-chart",
+                config={"scrollZoom": True, "displayModeBar": True,
+                        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                        "displaylogo": False},
+                style={"height": "460px"},
+            ),
+            style={
+                "background": SURFACE,
+                "border": f"1px solid {BORDER}",
+                "borderRadius": "4px",
+                "overflow": "hidden",
+                "borderTop": "2px solid #c084fc",
+            },
+        ),
+        html.P(
+            [
+                f"Variable: hurs (Near-Surface Relative Humidity, %) · "
+                f"Media global del ensamble de modelos activos · ",
+                html.Br(),
+                "Fuente: NASA NEX-GDDP-CMIP6 · SciVis Contest 2026",
+            ],
+            style={"marginTop": "12px", "fontSize": "9px", "color": MUTED,
+                "textAlign": "center", "letterSpacing": "0.06em",
+                "marginBottom": "8px"},
         ),
 
 
