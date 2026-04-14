@@ -421,18 +421,8 @@ def build_hurs_map_figure(model: str, scenario: str, year: int) -> go.Figure:
         paper_bgcolor="#080c14",
         plot_bgcolor="#080c14",
         font=dict(family="Space Mono, monospace", color="#c8d8f0", size=11),
-        title=dict(
-            text=(
-                f"<b>Humedad Relativa Near-Surface (hurs)</b><br>"
-                f"<span style='font-size:11px;color:#5a7099'>"
-                f"Modelo: {model} · {scen_label} · "
-                f"Año: {year} · Día {DOY} (~1 Jul)</span>"
-            ),
-            x=0.01,
-            xanchor="left",
-            font=dict(size=13, color="#e8f2ff"),
-        ),
-        margin=dict(l=ML, r=MR, t=MT, b=MB),
+        
+        margin=dict(l=ML, r=MR, t=20, b=MB),  # MT=75 → t=20
         height=FIG_H,
     )
 
@@ -607,70 +597,85 @@ def build_anomaly_figure(
     active_models: list[str],
     active_scens: list[str],
 ) -> go.Figure:
-    """Gráfica de anomalía de temperatura respecto a la media 1950–1980."""
-    fig = go.Figure()
+    """Heatmap de anomalía de temperatura por año y escenario."""
     BASELINE_START, BASELINE_END = 1950, 1980
 
-    # Calcular anomalías por escenario
-    scen_cfg = {
-        "historical": ("Anomalía histórica", "#6db3ff"),
-        "ssp245":     ("Anomalía SSP2-4.5",  "#38c7a0"),
-        "ssp585":     ("Anomalía SSP5-8.5",  "#f4714a"),
+    scen_labels = {
+        "historical": "Histórico",
+        "ssp245": "SSP2-4.5",
+        "ssp585": "SSP5-8.5",
     }
 
-    for scen in active_scens:
+    # Calcular baseline
+    hist_ens = ensemble_stats(data, active_models, "historical")
+    if hist_ens["years"]:
+        hist_years = np.array(hist_ens["years"])
+        hist_means = np.array(hist_ens["mean"])
+        mask = (hist_years >= BASELINE_START) & (hist_years <= BASELINE_END)
+        baseline = float(np.nanmean(hist_means[mask])) if mask.any() else 0.0
+    else:
+        baseline = 0.0
+
+    z_matrix = []   # filas del heatmap
+    y_labels  = []  # nombres de cada fila
+
+    for scen in ["historical", "ssp245", "ssp585"]:
+        if scen not in active_scens:
+            continue
         ens = ensemble_stats(data, active_models, scen)
         if not ens["years"]:
             continue
 
-        years = ens["years"]
-        means = np.array(ens["mean"])
+        years   = np.array(ens["years"])
+        anomaly = np.array(ens["mean"]) - baseline
 
-        # Calcular baseline (media 1950–1980) usando datos históricos
-        hist_ens = ensemble_stats(data, active_models, "historical")
-        if hist_ens["years"]:
-            hist_years = np.array(hist_ens["years"])
-            hist_means = np.array(hist_ens["mean"])
-            mask = (hist_years >= BASELINE_START) & (hist_years <= BASELINE_END)
-            baseline = float(np.nanmean(hist_means[mask])) if mask.any() else 0.0
-        else:
-            baseline = 0.0
+        # Rellenar años faltantes con NaN para que el heatmap sea continuo 1950–2100
+        full_years = np.arange(1950, 2101)
+        full_anomaly = np.full(len(full_years), np.nan)
+        for i, y in enumerate(years):
+            if 1950 <= y <= 2100:
+                full_anomaly[y - 1950] = anomaly[i]
 
-        anomaly = means - baseline
-        label, color = scen_cfg[scen]
+        z_matrix.append(full_anomaly.tolist())
+        y_labels.append(scen_labels[scen])
 
-        # Área rellena debajo/encima de cero
-        fig.add_trace(go.Scatter(
-            x=years,
-            y=anomaly.tolist(),
-            mode="lines",
-            fill="tozeroy",
-            fillcolor={
-                    "#6db3ff": "rgba(109,179,255,0.15)",
-                    "#38c7a0": "rgba(56,199,160,0.15)",
-                    "#f4714a": "rgba(244,113,74,0.15)",
-                }.get(color, "rgba(150,150,150,0.15)"),
-            line=dict(color=color, width=2),
-            name=label,
-            hovertemplate=f"{label}<br>Año: %{{x}}<br>Anomalía: %{{y:+.2f}}°C<extra></extra>",
-        ))
+    if not z_matrix:
+        return go.Figure()
 
-    # Línea cero (referencia)
-    fig.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.2)", line_width=1)
+    fig = go.Figure(go.Heatmap(
+        z=z_matrix,
+        x=list(range(1950, 2101)),
+        y=y_labels,
+        colorscale=[
+            [0.0,  "#0d47a1"],   # azul oscuro (muy frío)
+            [0.25, "#42a5f5"],   # azul claro
+            [0.45, "#e3f2fd"],   # blanco frío
+            [0.5,  "#ffffff"],   # blanco (anomalía = 0)
+            [0.55, "#fff9c4"],   # amarillo pálido
+            [0.75, "#ff7043"],   # naranja
+            [1.0,  "#b71c1c"],   # rojo oscuro (muy caliente)
+        ],
+        zmid=0,
+        zmin=-1,
+        zmax=6,
+        colorbar=dict(
+            title=dict(text="Anomalía (°C)", font=dict(size=11, color="#c8d8f0")),
+            ticksuffix="°C",
+            tickfont=dict(color="#c8d8f0", size=10),
+            outlinecolor="#1a2a4a",
+            outlinewidth=1,
+            len=0.8,
+        ),
+        hovertemplate="Año: %{x}<br>Escenario: %{y}<br>Anomalía: %{z:+.2f}°C<extra></extra>",
+        xgap=0.5,
+        ygap=3,
+    ))
 
-    # Umbrales París como anomalía
-    for delta, color, lbl in [(1.5, "rgba(255,220,80,0.7)", "+1.5°C París"),
-                               (2.0, "rgba(255,110,80,0.7)", "+2.0°C París")]:
-        fig.add_hline(
-            y=delta, line_dash="dash", line_color=color, line_width=1.5,
-            annotation_text=lbl, annotation_font_size=9,
-            annotation_font_color=color, annotation_position="right",
-        )
-
+    # Línea divisora histórico / proyección
     fig.add_vline(
-        x=2015, line_dash="dot", line_color="rgba(255,255,255,0.15)",
+        x=2015, line_dash="dot", line_color="rgba(255,255,255,0.4)", line_width=1.5,
         annotation_text="◀ HISTÓRICO | PROYECCIÓN ▶",
-        annotation_font_size=9, annotation_font_color="rgba(255,255,255,0.3)",
+        annotation_font_size=9, annotation_font_color="rgba(255,255,255,0.4)",
         annotation_position="top",
     )
 
@@ -678,32 +683,21 @@ def build_anomaly_figure(
         paper_bgcolor="#080c14",
         plot_bgcolor="#0d1526",
         font=dict(family="Space Mono, monospace", color="#c8d8f0", size=11),
-        title=dict(
-            text="Anomalía de Temperatura Respecto a la Media 1950–1980",
-            font=dict(size=13, color="#e8f2ff", family="Syne, sans-serif"),
-            x=0.01,
-            y=0.97,      # ← agrega esta línea
-            yanchor="top",  # ← y esta
-        ),
+        
         xaxis=dict(
-            title="Año", range=[1950, 2100],
+            title="Año",
             gridcolor="rgba(255,255,255,0.05)",
-            linecolor="#1a2a4a", tickfont=dict(size=10), dtick=10,
+            linecolor="#1a2a4a",
+            tickfont=dict(size=10),
+            dtick=10,
         ),
         yaxis=dict(
-            title="Anomalía (°C respecto a 1950–1980)",
-            gridcolor="rgba(255,255,255,0.05)",
-            linecolor="#1a2a4a", tickfont=dict(size=10), ticksuffix="°C",
-            zeroline=True, zerolinecolor="rgba(255,255,255,0.15)", zerolinewidth=1,
+            tickfont=dict(size=11, color="#c8d8f0"),
+            linecolor="#1a2a4a",
         ),
-        legend=dict(
-            bgcolor="rgba(13,21,38,0.85)", bordercolor="#1a2a4a", borderwidth=1,
-            font=dict(size=10), orientation="h",
-            yanchor="top", y=0.99, xanchor="left", x=0.35,  # ← leyenda a la derecha del título
-        ),
-        hovermode="x unified",
-        margin=dict(l=70, r=80, t=80, b=60),  # ← t=60 → t=80
-        height=380,
+        margin=dict(l=90, r=100, t=30, b=60),  # t: 80 → 30
+
+        height=320,
     )
     return fig
 
@@ -891,24 +885,24 @@ app.layout = dbc.Container(
                    "padding": "12px 16px"},
             class_name="g-2",
         ),
-
-        # ── Gráfico principal ────────────────────────────────────
-        dbc.Card(
-            dcc.Graph(
-                id="main-chart",
-                config={"scrollZoom": True, "displayModeBar": True,
-                        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
-                        "displaylogo": False},
-                style={"height": "500px"},
-            ),
-            style={
-                "background": SURFACE,
-                "border": f"1px solid {BORDER}",
-                "borderRadius": "4px",
-                "overflow": "hidden",
-                "borderTop": f"2px solid {ACCENT}",
-            },
-        ),
+        
+            # ── Gráfico principal ────────────────────────────────────
+            dbc.Card(
+                dcc.Graph(
+                    id="main-chart",
+                    config={"scrollZoom": True, "displayModeBar": True,
+                            "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                            "displaylogo": False},
+                    style={"height": "500px"},
+                ),
+                style={
+                    "background": SURFACE,
+                    "border": f"1px solid {BORDER}",
+                    "borderRadius": "4px",
+                    "overflow": "hidden",
+                    "borderTop": f"2px solid {ACCENT}",
+                },
+            ),  
 
         # ── Tarjetas de estadísticas ─────────────────────────────
         dbc.Row(
@@ -925,7 +919,29 @@ app.layout = dbc.Container(
             style={"marginTop": "16px"},
             class_name="g-2",
         ),
-
+        # ── Header contextual · Anomalía ─────────────────────────
+        html.Div([
+            html.P(
+                "IEEE SciVis Contest 2026 · NEX-GDDP CMIP6 · Derivado: anomalía",
+                style={"fontFamily": "Space Mono", "fontSize": "10px",
+                    "letterSpacing": "0.2em", "color": "#38c7a0",
+                    "textTransform": "uppercase", "marginBottom": "6px"},
+            ),
+            html.H2(
+                ["Mapa de Calor · ", html.Span("Anomalía de Temperatura 1950–2100", style={"color": "#38c7a0"})],
+                style={"fontFamily": "Syne, sans-serif", "fontWeight": "800",
+                    "fontSize": "clamp(16px,2.5vw,26px)", "color": "#e8f2ff",
+                    "letterSpacing": "-0.02em", "lineHeight": "1.1"},
+            ),
+            html.P(
+                "Anomalía de temperatura respecto a la línea base 1950–1980 · Cada fila representa un escenario; "
+                "cada columna, un año. Colores fríos (azul) = temperaturas por debajo de la media histórica; "
+                "colores cálidos (naranja–rojo) = calentamiento progresivo. "
+                "Permite comparar visualmente la velocidad de calentamiento entre escenarios.",
+                style={"fontSize": "11px", "color": MUTED, "lineHeight": "1.7",
+                    "maxWidth": "760px", "marginTop": "4px"},
+            ),
+        ], style={"marginTop": "28px", "marginBottom": "10px"}),
         # ── Gráfica de anomalía ──────────────────────────────────
         dbc.Card(
             dcc.Graph(
