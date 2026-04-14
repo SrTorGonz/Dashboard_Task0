@@ -382,6 +382,110 @@ def build_figure(
 
     return fig
 
+def build_anomaly_figure(
+    data: dict,
+    active_models: list[str],
+    active_scens: list[str],
+) -> go.Figure:
+    """Gráfica de anomalía de temperatura respecto a la media 1950–1980."""
+    fig = go.Figure()
+    BASELINE_START, BASELINE_END = 1950, 1980
+
+    # Calcular anomalías por escenario
+    scen_cfg = {
+        "historical": ("Anomalía histórica", "#6db3ff"),
+        "ssp245":     ("Anomalía SSP2-4.5",  "#38c7a0"),
+        "ssp585":     ("Anomalía SSP5-8.5",  "#f4714a"),
+    }
+
+    for scen in active_scens:
+        ens = ensemble_stats(data, active_models, scen)
+        if not ens["years"]:
+            continue
+
+        years = ens["years"]
+        means = np.array(ens["mean"])
+
+        # Calcular baseline (media 1950–1980) usando datos históricos
+        hist_ens = ensemble_stats(data, active_models, "historical")
+        if hist_ens["years"]:
+            hist_years = np.array(hist_ens["years"])
+            hist_means = np.array(hist_ens["mean"])
+            mask = (hist_years >= BASELINE_START) & (hist_years <= BASELINE_END)
+            baseline = float(np.nanmean(hist_means[mask])) if mask.any() else 0.0
+        else:
+            baseline = 0.0
+
+        anomaly = means - baseline
+        label, color = scen_cfg[scen]
+
+        # Área rellena debajo/encima de cero
+        fig.add_trace(go.Scatter(
+            x=years,
+            y=anomaly.tolist(),
+            mode="lines",
+            fill="tozeroy",
+            fillcolor={
+                    "#6db3ff": "rgba(109,179,255,0.15)",
+                    "#38c7a0": "rgba(56,199,160,0.15)",
+                    "#f4714a": "rgba(244,113,74,0.15)",
+                }.get(color, "rgba(150,150,150,0.15)"),
+            line=dict(color=color, width=2),
+            name=label,
+            hovertemplate=f"{label}<br>Año: %{{x}}<br>Anomalía: %{{y:+.2f}}°C<extra></extra>",
+        ))
+
+    # Línea cero (referencia)
+    fig.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.2)", line_width=1)
+
+    # Umbrales París como anomalía
+    for delta, color, lbl in [(1.5, "rgba(255,220,80,0.7)", "+1.5°C París"),
+                               (2.0, "rgba(255,110,80,0.7)", "+2.0°C París")]:
+        fig.add_hline(
+            y=delta, line_dash="dash", line_color=color, line_width=1.5,
+            annotation_text=lbl, annotation_font_size=9,
+            annotation_font_color=color, annotation_position="right",
+        )
+
+    fig.add_vline(
+        x=2015, line_dash="dot", line_color="rgba(255,255,255,0.15)",
+        annotation_text="◀ HISTÓRICO | PROYECCIÓN ▶",
+        annotation_font_size=9, annotation_font_color="rgba(255,255,255,0.3)",
+        annotation_position="top",
+    )
+
+    fig.update_layout(
+        paper_bgcolor="#080c14",
+        plot_bgcolor="#0d1526",
+        font=dict(family="Space Mono, monospace", color="#c8d8f0", size=11),
+        title=dict(
+            text="Anomalía de Temperatura Respecto a la Media 1950–1980",
+            font=dict(size=13, color="#e8f2ff", family="Syne, sans-serif"),
+            x=0.01,
+            y=0.97,      # ← agrega esta línea
+            yanchor="top",  # ← y esta
+        ),
+        xaxis=dict(
+            title="Año", range=[1950, 2100],
+            gridcolor="rgba(255,255,255,0.05)",
+            linecolor="#1a2a4a", tickfont=dict(size=10), dtick=10,
+        ),
+        yaxis=dict(
+            title="Anomalía (°C respecto a 1950–1980)",
+            gridcolor="rgba(255,255,255,0.05)",
+            linecolor="#1a2a4a", tickfont=dict(size=10), ticksuffix="°C",
+            zeroline=True, zerolinecolor="rgba(255,255,255,0.15)", zerolinewidth=1,
+        ),
+        legend=dict(
+            bgcolor="rgba(13,21,38,0.85)", bordercolor="#1a2a4a", borderwidth=1,
+            font=dict(size=10), orientation="h",
+            yanchor="top", y=0.99, xanchor="left", x=0.35,  # ← leyenda a la derecha del título
+        ),
+        hovermode="x unified",
+        margin=dict(l=70, r=80, t=80, b=60),  # ← t=60 → t=80
+        height=380,
+    )
+    return fig
 
 # ──────────────────────────────────────────────────────────────────
 # 5.  APP DASH
@@ -597,6 +701,25 @@ app.layout = dbc.Container(
             class_name="g-2",
         ),
 
+        # ── Gráfica de anomalía ──────────────────────────────────
+        dbc.Card(
+            dcc.Graph(
+                id="anomaly-chart",
+                config={"scrollZoom": True, "displayModeBar": True,
+                        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                        "displaylogo": False},
+                style={"height": "380px"},
+            ),
+            style={
+                "background": SURFACE,
+                "border": f"1px solid {BORDER}",
+                "borderRadius": "4px",
+                "overflow": "hidden",
+                "borderTop": f"2px solid #38c7a0",
+                "marginTop": "16px",
+            },
+        ),
+
         # ── Nota de calidad y fuente ─────────────────────────────
         html.P(
             [
@@ -622,29 +745,33 @@ app.layout = dbc.Container(
 # ──────────────────────────────────────────────────────────────────
 @app.callback(
     Output("main-chart", "figure"),
-    Output("stat-base",  "children"),
-    Output("stat-hist",  "children"),
-    Output("stat-245",   "children"),
-    Output("stat-585",   "children"),
-    Input("scen-checklist",  "value"),
+    Output("anomaly-chart", "figure"),   # ← NUEVA LÍNEA
+    Output("stat-base", "children"),
+    Output("stat-hist", "children"),
+    Output("stat-245", "children"),
+    Output("stat-585", "children"),
+    Input("scen-checklist", "value"),
     Input("model-checklist", "value"),
-    Input("opts-checklist",  "value"),
+    Input("opts-checklist", "value"),
 )
 def update_chart(active_scens, active_models, opts):
-    show_bands  = "bands"  in (opts or [])
+    show_bands = "bands" in (opts or [])
     show_thresh = "thresh" in (opts or [])
 
     fig = build_figure(DATA, active_models or [], active_scens or [],
                        show_bands, show_thresh)
 
+    # ← NUEVA LÍNEA
+    fig_anomaly = build_anomaly_figure(DATA, active_models or [], active_scens or [])
+
     stats = compute_stats_cards(DATA, active_models or [])
 
-    base_str  = f"{stats['base']:.2f}°C"         if stats["base"]        else "–"
-    hist_str  = f"+{stats['hist_delta']:.2f}°C"  if stats["hist_delta"]  else "–"
-    s245_str  = f"{stats['ssp245_2100']:.2f}°C"  if stats["ssp245_2100"] else "–"
-    s585_str  = f"{stats['ssp585_2100']:.2f}°C"  if stats["ssp585_2100"] else "–"
+    base_str = f"{stats['base']:.2f}°C" if stats["base"] else "–"
+    hist_str = f"+{stats['hist_delta']:.2f}°C" if stats["hist_delta"] else "–"
+    s245_str = f"{stats['ssp245_2100']:.2f}°C" if stats["ssp245_2100"] else "–"
+    s585_str = f"{stats['ssp585_2100']:.2f}°C" if stats["ssp585_2100"] else "–"
 
-    return fig, base_str, hist_str, s245_str, s585_str
+    return fig, fig_anomaly, base_str, hist_str, s245_str, s585_str  # ← fig_anomaly añadido
 
 
 # ──────────────────────────────────────────────────────────────────
